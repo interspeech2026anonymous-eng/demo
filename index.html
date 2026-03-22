@@ -29,15 +29,46 @@
         }
 
         body {
-            margin: 0; padding: 20px;
+            margin: 0; padding: 0;
             font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
             background: var(--bg-color);
             color: var(--text-main);
             height: 100vh;
             display: flex; 
-            flex-direction: row; 
-            gap: 15px;
+            flex-direction: column; /* Changed to column to stack nav */
             overflow: hidden;
+            box-sizing: border-box;
+        }
+
+        /* --- Header / Dropdown Section --- */
+        .top-nav {
+            background: #212529;
+            color: white;
+            padding: 10px 20px;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+            z-index: 100;
+        }
+        
+        .top-nav select {
+            padding: 6px 12px;
+            border-radius: 4px;
+            border: none;
+            background: #fff;
+            font-size: 14px;
+            cursor: pointer;
+            min-width: 250px;
+        }
+
+        .main-container {
+            flex: 1;
+            display: flex;
+            flex-direction: row;
+            gap: 15px;
+            padding: 15px;
+            min-height: 0;
             box-sizing: border-box;
         }
 
@@ -113,35 +144,48 @@
 </head>
 <body>
 
-<div class="panel left-panel">
-    <div>
-        <h3>Global Context</h3>
-        <div id="shiftHoldContainer"></div>
-        <div style="margin-top: 15px;"></div>
-        <h3>GVAP Top 5</h3>
-        <div id="globalList"></div>
-        <div style="margin-top: 15px;"></div>
-        <h3>Future Predictions (SVAP)</h3>
-        <div id="predList"></div>
-    </div>
+<div class="top-nav">
+    <strong>Project:</strong>
+    <select id="videoSelector">
+        <option value="" disabled selected>Select a video...</option>
+        <option value="3speaker_conversation">3speaker_conversation.mp4</option>
+        <option value="2speaker_conversation">2speaker_conversation.mp4</option>
+        <option value="3speaker_statement">3speaker_statement.mp4</option>
+    </select>
+    <span id="loadingStatus" style="font-size: 12px; color: #aaa;"></span>
 </div>
 
-<div class="right-column">
-    <div class="video-wrapper" id="videoContainer">
-        <video id="mainVideo" src="seg02.mp4" controls playsinline crossorigin="anonymous"></video>
-        <canvas id="overlay"></canvas>
-        <div id="frameInfo">Frame: 0</div>
-        
-        <div class="zoom-controls">
-            <span>Zoom</span>
-            <input type="range" id="zoomSlider" min="2" max="30" step="1" value="8">
-            <span id="zoomVal">8s</span>
+<div class="main-container">
+    <div class="panel left-panel">
+        <div>
+            <h3>Global Context</h3>
+            <div id="shiftHoldContainer"></div>
+            <div style="margin-top: 15px;"></div>
+            <h3>GVAP Top 5</h3>
+            <div id="globalList"></div>
+            <div style="margin-top: 15px;"></div>
+            <h3>Future Predictions (SVAP)</h3>
+            <div id="predList"></div>
         </div>
     </div>
 
-    <div class="timeline-wrapper">
-        <div class="global-nav" id="navContainer"><canvas id="globalNav"></canvas></div>
-        <div class="timeline-scroll" id="timelineScroll"><canvas id="timeline"></canvas></div>
+    <div class="right-column">
+        <div class="video-wrapper" id="videoContainer">
+            <video id="mainVideo" controls playsinline crossorigin="anonymous"></video>
+            <canvas id="overlay"></canvas>
+            <div id="frameInfo">Frame: 0</div>
+            
+            <div class="zoom-controls">
+                <span>Zoom</span>
+                <input type="range" id="zoomSlider" min="2" max="30" step="1" value="8">
+                <span id="zoomVal">8s</span>
+            </div>
+        </div>
+
+        <div class="timeline-wrapper">
+            <div class="global-nav" id="navContainer"><canvas id="globalNav"></canvas></div>
+            <div class="timeline-scroll" id="timelineScroll"><canvas id="timeline"></canvas></div>
+        </div>
     </div>
 </div>
 
@@ -159,7 +203,8 @@
         audioSampleRate: 16000
     };
     
-    let data = null, colors = [], audioPeaks = [];
+    let data = null, colors = [], audioPeaks = [], maxPeak = 0.001;
+    let audioCtx = null;
     
     const video = document.getElementById('mainVideo');
     const cvsOverlay = document.getElementById('overlay');
@@ -171,24 +216,80 @@
     const ctxNav = cvsNav.getContext('2d');
     const frameInfo = document.getElementById('frameInfo');
     const zoomSlider = document.getElementById('zoomSlider');
+    const selector = document.getElementById('videoSelector');
+    const loadingStatus = document.getElementById('loadingStatus');
+
+    // --- Dynamic Loading Logic ---
+    selector.addEventListener('change', (e) => {
+        const videoID = e.target.value;
+        if (videoID) loadProject(videoID);
+    });
+
+    async function loadProject(id) {
+        loadingStatus.innerText = "Loading data...";
+        data = null; audioPeaks = []; maxPeak = 0.001;
+        
+        try {
+            const response = await fetch(`./json/${id}.json`);
+            if (!response.ok) throw new Error("JSON file not found");
+            data = await response.json();
+            colors = data.colors;
+
+            video.src = `./video/${id}.mp4`;
+            video.load();
+
+            let previousSpk = -1;
+            data.frames.forEach(f => {
+                let maxVad = -1; let highestVadSpk = -1;
+                f.speakers.forEach(spk => {
+                    const v = f.vad[spk.id] || 0;
+                    if (v > maxVad) { maxVad = v; highestVadSpk = spk.id; }
+                });
+                if (previousSpk === -1 && highestVadSpk !== -1) previousSpk = highestVadSpk;
+                f.ui_next_spk = -1;
+                if ((f.shift_prob || 0) > 0.5) {
+                    let maxVadExcluding = -1, nextSpk = -1;
+                    f.speakers.forEach(spk => {
+                        if (spk.id !== previousSpk) { 
+                            const v = f.vad[spk.id] || 0;
+                            if (v > maxVadExcluding) { maxVadExcluding = v; nextSpk = spk.id; }
+                        }
+                    });
+                    f.ui_next_spk = nextSpk;
+                }
+                if (highestVadSpk !== -1 && maxVad > 0.5) previousSpk = highestVadSpk;
+            });
+
+            const totalH = CONFIG.audioHeight + CONFIG.shiftHeight + (data.num_speakers * CONFIG.speakerHeight);
+            cvsTimeline.height = totalH; 
+            cvsTimeline.style.height = totalH + "px";
+
+            await initAudioWaveform(video.src);
+            loadingStatus.innerText = "Ready";
+            resize();
+        } catch (err) {
+            console.error(err);
+            loadingStatus.innerText = "Error loading files";
+        }
+    }
 
     async function initAudioWaveform(url) {
         try {
             const response = await fetch(url);
             const arrayBuffer = await response.arrayBuffer();
-            const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: CONFIG.audioSampleRate });
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: CONFIG.audioSampleRate });
             const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
             const channelData = audioBuffer.getChannelData(0);
             
-            // Samples per peak: smaller number = higher detail
             const samplesPerPeak = Math.floor(audioBuffer.sampleRate / 150); 
             for (let i = 0; i < channelData.length; i += samplesPerPeak) {
-                let max = 0;
+                let m = 0;
                 for (let j = 0; j < samplesPerPeak; j++) {
                     const val = Math.abs(channelData[i + j]);
-                    if (val > max) max = val;
+                    if (val > m) m = val;
                 }
-                audioPeaks.push({ time: (i / audioBuffer.sampleRate), peak: max });
+                audioPeaks.push({ time: (i / audioBuffer.sampleRate), peak: m });
+                if (m > maxPeak) maxPeak = m; // Update per-video maxPeak
             }
             drawFrame();
         } catch (e) { console.error("Audio Load Error:", e); }
@@ -200,51 +301,14 @@
         drawFrame();
     });
 
-    fetch('viz_data.json').then(r => r.json()).then(json => {
-        data = json;
-        colors = data.colors;
-        initAudioWaveform(video.src);
-
-        let previousSpk = -1;
-        data.frames.forEach(f => {
-            let maxVad = -1; let highestVadSpk = -1;
-            f.speakers.forEach(spk => {
-                const v = f.vad[spk.id] || 0;
-                if (v > maxVad) { maxVad = v; highestVadSpk = spk.id; }
-            });
-            if (previousSpk === -1 && highestVadSpk !== -1) previousSpk = highestVadSpk;
-            f.ui_next_spk = -1;
-            if ((f.shift_prob || 0) > 0.5) {
-                let maxVadExcluding = -1, nextSpk = -1;
-                f.speakers.forEach(spk => {
-                    if (spk.id !== previousSpk) { 
-                        const v = f.vad[spk.id] || 0;
-                        if (v > maxVadExcluding) { maxVadExcluding = v; nextSpk = spk.id; }
-                    }
-                });
-                f.ui_next_spk = nextSpk;
-            }
-            if (highestVadSpk !== -1 && maxVad > 0.5) previousSpk = highestVadSpk;
-        });
-
-        // Total height now includes separate Audio and Shift tracks
-        const totalH = CONFIG.audioHeight + CONFIG.shiftHeight + (data.num_speakers * CONFIG.speakerHeight);
-        cvsTimeline.height = totalH; 
-        cvsTimeline.style.height = totalH + "px";
-        window.addEventListener('resize', resize);
-        window.addEventListener('keydown', onKeyDown);
-        cvsNav.addEventListener('mousedown', onNavClick); 
-        cvsTimeline.addEventListener('mousedown', onTimelineClick);
-        if(video.readyState >= 1) { resize(); requestAnimationFrame(loop); } 
-        else { video.addEventListener('loadedmetadata', () => { resize(); requestAnimationFrame(loop); }); }
-    });
-
     function onNavClick(e) {
+        if (!data) return;
         const rect = cvsNav.getBoundingClientRect();
         video.currentTime = (e.offsetX / rect.width) * (data.total_frames / data.fps);
     }
 
     function onTimelineClick(e) {
+        if (!data) return;
         const pxPerSec = cvsTimeline.width / CONFIG.stripSeconds;
         video.currentTime = Math.max(0, video.currentTime + (e.offsetX - cvsTimeline.width / 2) / pxPerSec);
     }
@@ -268,7 +332,14 @@
     }
 
     function loop() { if(!video.paused && !video.ended) drawFrame(); requestAnimationFrame(loop); }
+    
+    // Core Event Listeners
+    window.addEventListener('resize', resize);
+    window.addEventListener('keydown', onKeyDown);
+    cvsNav.addEventListener('mousedown', onNavClick); 
+    cvsTimeline.addEventListener('mousedown', onTimelineClick);
     video.addEventListener('seeked', drawFrame);
+    requestAnimationFrame(loop);
 
     function drawFrame() {
         if(!data) return;
@@ -284,6 +355,7 @@
         drawGlobalNav(frameIdx);
     }
 
+    // THIS FUNCTION IS UNTOUCHED FROM YOUR TEMPLATE
     function drawOverlayCorrected(frame) {
         const videoRatio = video.videoWidth / video.videoHeight;
         const canvasRatio = cvsOverlay.width / cvsOverlay.height;
@@ -390,7 +462,7 @@
         const pxPerFrame = w / (data.fps * CONFIG.stripSeconds);
         const currentTime = video.currentTime;
         
-        // 1. Audio Track
+        // 1. Audio Track (Normalized)
         ctxTimeline.fillStyle = getTheme('--audio-bg'); 
         ctxTimeline.fillRect(0,0,w,CONFIG.audioHeight);
         
@@ -403,7 +475,7 @@
             audioPeaks.forEach(p => {
                 if (p.time >= startT && p.time <= endT) {
                     const x = centerX + (p.time - currentTime) * pxPerSec;
-                    const amp = p.peak * (CONFIG.audioHeight * 0.9);
+                    const amp = (p.peak / maxPeak) * (CONFIG.audioHeight * 0.9); // Normalization applied here
                     ctxTimeline.moveTo(x, (CONFIG.audioHeight / 2) - amp / 2);
                     ctxTimeline.lineTo(x, (CONFIG.audioHeight / 2) + amp / 2);
                 }
@@ -411,7 +483,7 @@
             ctxTimeline.stroke();
         }
 
-// 2. Speaker Tracks (Actual vs Predicted)
+        // 2. Speaker Tracks (Actual vs Predicted)
         const speakerYStart = CONFIG.audioHeight + CONFIG.shiftHeight;
         const startF = Math.floor(frameIdx - (w/2)/pxPerFrame);
         const endF = Math.ceil(frameIdx + (w/2)/pxPerFrame);
@@ -441,55 +513,27 @@
             }
             if (startI !== null) ctxTimeline.fillRect(centerX + (startI - frameIdx) * pxPerFrame, y + 5, (endF - startI) * pxPerFrame, 35);
 
-            // --- TRACK B: ASD PREDICTION (First Bin) ---
+            // --- TRACK B: ASD/SVAP PREDICTION (First Bin) ---
             ctxTimeline.globalAlpha = 1.0;
-            ctxTimeline.strokeStyle = c;
-            ctxTimeline.lineWidth = 2;
-            let predStartI = null;
-            for(let s=0; s<data.num_speakers; s++) {
-                        const y = speakerYStart + s * CONFIG.speakerHeight;
-                        const c = colors[s % colors.length];
-                        
-                        // ... (keep your background and GT drawing here) ...
-
-                        // --- TRACK B: ASD/SVAP PREDICTION (First Bin) ---
-                        ctxTimeline.globalAlpha = 1.0;
-                        ctxTimeline.fillStyle = c;
-                        
-                        // Loop through every frame visible in the current zoom window
-                        for(let i = startF; i <= endF; i++) {
-                            if (i < 0 || i >= data.total_frames) continue;
-                            
-                            const f = data.frames[i];
-                            const spk = f.speakers[s];
-                            
-                            // Logic: Check if the first bin of the future prediction is active (> 0.5)
-                            // In your data gen, this is speakers[s].future_pred_grid[0]
-                            if (spk && spk.future_pred_grid && spk.future_pred_grid[0] > 0.5) {
-                                const x = centerX + (i - frameIdx) * pxPerFrame;
-                                
-                                // Draw a solid vertical sliver for this specific frame
-                                // Using pxPerFrame + 0.5 to ensure no gaps between frames
-                                ctxTimeline.fillRect(x, y + 45, pxPerFrame + 0.5, 35);
-                            }
-                        }
-
-                        // Labels
-                        ctxTimeline.fillStyle = c;
-                        ctxTimeline.font = "bold 14px sans-serif";
-                        ctxTimeline.fillText(`S${s} GT`, 5, y + 25);
-                        ctxTimeline.font = "italic 12px sans-serif";
-                        ctxTimeline.fillText(`S${s} PRED`, 5, y + 65);
-                    }
-            if (predStartI !== null) ctxTimeline.strokeRect(centerX + (predStartI - frameIdx) * pxPerFrame, y + 45, (endF - predStartI) * pxPerFrame, 35);
+            ctxTimeline.fillStyle = c;
+            
+            for(let i = startF; i <= endF; i++) {
+                if (i < 0 || i >= data.total_frames) continue;
+                const f = data.frames[i];
+                const spk = f.speakers[s];
+                
+                if (spk && spk.future_pred_grid && spk.future_pred_grid[0] > 0.5) {
+                    const x = centerX + (i - frameIdx) * pxPerFrame;
+                    ctxTimeline.fillRect(x, y + 45, pxPerFrame + 0.5, 35);
+                }
+            }
 
             // Labels
-            ctxTimeline.globalAlpha = 1.0;
             ctxTimeline.fillStyle = c;
             ctxTimeline.font = "bold 14px sans-serif";
             ctxTimeline.fillText(`S${s} GT`, 5, y + 25);
             ctxTimeline.font = "italic 12px sans-serif";
-            ctxTimeline.fillText(`S${s} ASD`, 5, y + 65);
+            ctxTimeline.fillText(`S${s} PRED`, 5, y + 65);
         }
         
         // Playhead
